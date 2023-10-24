@@ -1,19 +1,24 @@
 extern crate hyperscan;
 use hyperscan::prelude::*;
+use hyperscan::HsError::ScanTerminated;
 
 use avt::Vt;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use std::fs;
-use std::io::{self, BufReader, BufRead};
+use std::io::{self, BufRead, BufReader};
 
-use serde::{Deserialize, Serialize};
 use chrono::{Local, TimeZone};
+use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+use log::{debug, info, warn};
+
+use std::io::IsTerminal;
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Copy, Clone)]
 enum EntryKind {
     #[serde(rename = "i")]
     Input,
@@ -23,6 +28,8 @@ enum EntryKind {
     Mark,
     #[serde(rename = "r")]
     Resize,
+    #[serde(rename = "f")]
+    TermFlags,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -56,6 +63,327 @@ struct Entry {
     data: String,
 }
 
+struct MatchData {
+    filename: String,
+    start_time: u64,
+    start_frame: usize,
+    end_frame: usize,
+    start_ts: f64,
+    end_ts: f64,
+    last_frame_text: String,
+    match_ranges: Vec<(usize, usize)>,
+}
+
+fn events(
+    reader: impl BufRead,
+    event_type: Option<EntryKind>,
+) -> impl Iterator<Item = (f64, String)> {
+    reader.lines().filter_map(move |line| {
+        let line = line.ok()?;
+        let entry: Entry = serde_json::from_str(&line).ok()?;
+        if let Some(kind) = event_type {
+            if entry.kind != kind {
+                return None;
+            }
+        }
+        Some((entry.timestamp, entry.data))
+    })
+}
+
+fn stdout(reader: impl BufRead + 'static) -> Box<dyn Iterator<Item = (f64, String)>> {
+    Box::new(events(reader, Some(EntryKind::Output)))
+}
+
+fn stdin(reader: impl BufRead + 'static) -> Box<dyn Iterator<Item = (f64, String)>> {
+    Box::new(events(reader, Some(EntryKind::Input)))
+}
+
+pub fn frames(
+    stream: impl Iterator<Item = (f64, String)>,
+    is_stdin: bool,
+) -> impl Iterator<Item = (f64, Vec<Vec<(char, avt::Pen)>>, Option<(usize, usize)>)> {
+    // 1000 chars should be enough for anyone
+    let mut vt = Vt::new(1000, 100);
+    let mut prev_cursor = None;
+
+    stream.filter_map(move |(time, data)| {
+        // For stdin, we need to change \r to \r\n
+        let data = if is_stdin {
+            data.replace("\r", "\r\n")
+        } else {
+            data
+        };
+        let (changed_lines, _) = vt.feed_str(&data);
+        let cursor: Option<(usize, usize)> = vt.cursor().into();
+
+        if !changed_lines.is_empty() || cursor != prev_cursor {
+            prev_cursor = cursor;
+
+            let lines = vt
+                .view()
+                .iter()
+                .map(|line| line.cells().collect())
+                .collect();
+
+            Some((time, lines, cursor))
+        } else {
+            prev_cursor = cursor;
+
+            None
+        }
+    })
+}
+
+fn make_timestamp(start_time: u64, offset: f64) -> String {
+    let ts = Local
+        .timestamp_opt(
+            start_time as i64 + offset as i64,
+            (offset.fract() * 1e9) as u32,
+        )
+        .unwrap();
+    ts.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+const COLOR_RED: &str = "\x1b[31m";
+const COLOR_RESET: &str = "\x1b[0m";
+
+fn highlight_matches(matchdata: &MatchData, args: &Args) -> String {
+    let use_color = match args.color {
+        Color::Auto => {
+            // Only use color if stdout is a terminal
+            io::stdout().is_terminal()
+        }
+        Color::Always => true,
+        Color::Never => false,
+    };
+    let mut result = String::new();
+    for (i, ch) in matchdata.last_frame_text.chars().enumerate() {
+        for (from, to) in matchdata.match_ranges.iter() {
+            if use_color && i == *from {
+                result.push_str(COLOR_RED);
+            }
+            if use_color && i == *to {
+                result.push_str(COLOR_RESET);
+            }
+        }
+        result.push(ch);
+    }
+    result
+}
+
+fn highlight_matchlines(matchdata: &MatchData, args: &Args) -> String {
+    let use_color = match args.color {
+        Color::Auto => {
+            // Only use color if stdout is a terminal
+            io::stdout().is_terminal()
+        }
+        Color::Always => true,
+        Color::Never => false,
+    };
+    let mut result = String::new();
+    // Iterate over lines in the frame; only add lines with matches (and highlight the matches)
+    let mut pos = 0;
+    for (i, line) in matchdata.last_frame_text.lines().enumerate() {
+        let line_end = pos + line.len();
+        let mut line_text = String::new();
+        let mut line_pos = 0;
+        for &(from, to) in matchdata.match_ranges.iter() {
+            if from >= pos && to <= line_end {
+                // This match is within the line
+                line_text.push_str(&line[line_pos..(from - pos)]);
+                if use_color {
+                    line_text.push_str(COLOR_RED);
+                }
+                line_text.push_str(&line[(from - pos)..(to - pos)]);
+                if use_color {
+                    line_text.push_str(COLOR_RESET);
+                }
+                line_pos = to - pos;
+            }
+        }
+        if line_pos != 0 {
+            line_text.push_str(&line[line_pos..]);
+        }
+        if !line_text.is_empty() {
+            if args.show_line_numbers {
+                result.push_str(&format!("{:4}: ", i + 1));
+            }
+            result.push_str(&line_text);
+            result.push('\n');
+        }
+        pos += line.len() + 1;
+    }
+    result
+}
+
+fn display_match(matchdata: &MatchData, args: &Args) {
+    if args.list_only {
+        println!("{}", matchdata.filename);
+        return;
+    }
+    let start_timestamp = make_timestamp(matchdata.start_time, matchdata.start_ts);
+    let end_timestamp = make_timestamp(matchdata.start_time, matchdata.end_ts);
+    let nframes = matchdata.end_frame - matchdata.start_frame + 1;
+    println!(
+        "{}: Match found for {} in frames [{},{}] ({} frame{}): {} .. {}",
+        matchdata.filename,
+        args.pattern,
+        matchdata.start_frame,
+        matchdata.end_frame,
+        nframes,
+        if nframes == 1 { "" } else { "s" },
+        start_timestamp,
+        end_timestamp,
+    );
+    // Print the matching lines in the frame
+    if args.show_full_frame {
+        print!("{}", highlight_matches(&matchdata, &args));
+    } else {
+        print!("{}", highlight_matchlines(&matchdata, &args));
+    }
+}
+
+fn search_file(pattern: &Pattern, file: &str, args: &Args) {
+    let db: BlockDatabase = pattern.build().unwrap_or_else(|e| {
+        eprintln!("Error building pattern {}: {}", pattern.expression, e);
+        std::process::exit(1);
+    });
+    let scratch = db.alloc_scratch().unwrap();
+
+    let mut reader: Box<dyn BufRead> = if file == "-" {
+        Box::new(BufReader::new(io::stdin()))
+    } else if file.ends_with(".zst") {
+        Box::new(BufReader::new(
+            zstd::Decoder::new(fs::File::open(file).unwrap()).unwrap(),
+        ))
+    } else {
+        Box::new(BufReader::new(fs::File::open(file).unwrap()))
+    };
+
+    // Read the header line of the input
+    let mut header_line = String::new();
+    reader.read_line(&mut header_line).unwrap();
+    let header: Header = serde_json::from_str(&header_line).unwrap();
+
+    // Print the header line
+    debug!("{:?}", header);
+    let start_time = header.timestamp.unwrap_or(0);
+
+    // Count matches
+    let mut match_count = 0;
+    let max_matches = args.max_matches.unwrap_or(usize::MAX);
+
+    // Collect matching frames
+    let mut mi: Option<MatchData> = None;
+    let target_is_stdin = args.event_type == "stdin";
+    let event_stream = if target_is_stdin {
+        stdin(reader)
+    } else {
+        stdout(reader)
+    };
+
+    for (i, (time, lines, _cursor)) in frames(event_stream, target_is_stdin).enumerate() {
+        let mut frame_text = String::new();
+        for chars in lines.iter() {
+            let mut line_text = String::new();
+            // Collect the text of the line
+            for (ch, _pen) in chars.iter() {
+                line_text.push(*ch);
+            }
+            // Trim the line and only add it if it's not empty
+            line_text = line_text.trim_end().to_string();
+            if !line_text.is_empty() {
+                frame_text.push_str(&line_text);
+                frame_text.push('\n');
+            }
+        }
+        let res = db.scan(
+            frame_text.clone(),
+            &scratch,
+            |_id, from: u64, to, _flags| {
+                debug!("Match frame {} at {} from {} to {}", i, time, from, to);
+                match_count += 1;
+                if match_count > max_matches {
+                    warn!("Maximum number of matches reached; stopping");
+                    return Matching::Terminate;
+                }
+                match mi {
+                    None => {
+                        mi = Some(MatchData {
+                            filename: file.to_string(),
+                            start_time,
+                            start_frame: i,
+                            end_frame: i,
+                            start_ts: time,
+                            end_ts: time,
+                            last_frame_text: frame_text.clone(),
+                            match_ranges: vec![(from as usize, to as usize)],
+                        });
+                        debug!(
+                            "First matching frame found at {} {}",
+                            i,
+                            make_timestamp(start_time, time)
+                        );
+                    }
+                    Some(ref mut mi) => {
+                        if i == mi.end_frame + 1 {
+                            // Contiguous
+                            mi.end_frame = i;
+                            mi.end_ts = time;
+                            mi.last_frame_text.clear();
+                            mi.last_frame_text.push_str(&frame_text);
+                            mi.match_ranges.clear();
+                            mi.match_ranges.push((from as usize, to as usize));
+                            debug!("Extended matching frame range to {}", i);
+                        } else if i == mi.end_frame {
+                            // Same frame; add the match to the list
+                            mi.match_ranges.push((from as usize, to as usize));
+                            debug!("Additional match within the same frame; do nothing");
+                        } else {
+                            // Not contiguous; display the match. We use the last frame text.
+                            // TODO: consider whether we should do something if there are multiple
+                            // matches in the same frame; by the time we get to the last frame
+                            // some of the matches may have disappeared...
+                            display_match(mi, args);
+                            mi.start_frame = i;
+                            mi.end_frame = i;
+                            mi.start_ts = time;
+                            mi.end_ts = time;
+                            mi.last_frame_text.clear();
+                            mi.last_frame_text.push_str(&frame_text);
+                            mi.match_ranges.clear();
+                            mi.match_ranges.push((from as usize, to as usize));
+                        }
+                    }
+                }
+                return Matching::Continue;
+            },
+        );
+        if let Err(e) = res {
+            match e {
+                hyperscan::Error::Hyperscan(ScanTerminated) => {
+                    info!("Scan terminated");
+                    break;
+                }
+                _ => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    // Display the last match
+    if let Some(mi) = mi {
+        display_match(&mi, args);
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum Color {
+    Auto,
+    Always,
+    Never,
+}
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -69,154 +397,38 @@ struct Args {
 
     #[arg(short = 'i', long, help = "Make the search case-insensitive")]
     case_insensitive: bool,
-}
 
-fn trim_text(text: &mut Vec<String>) {
-    println!("Before trim: {:?}", text);
-    while !text.is_empty() && text[text.len() - 1].is_empty() {
-        text.truncate(text.len() - 1);
-    }
-}
+    #[arg(short = 'm', long, help = "Set maximum number of matches to report")]
+    max_matches: Option<usize>,
 
-fn search_file(pattern: &Pattern, file: &str, args: &Args) {
-    let db: StreamingDatabase = pattern.build().unwrap_or_else(|e| {
-        eprintln!("Error building pattern {}: {}", pattern.expression, e);
-        std::process::exit(1);
-    });
-    let scratch = db.alloc_scratch().unwrap();
-    let st = db.open_stream().unwrap();
+    #[arg(short = 'l', long, help = "Only list filenames; do not show matches")]
+    list_only: bool,
 
-    // 1000 chars should be enough for anyone
-    let mut vt = Vt::new(1000, 100);
+    #[arg(short = 'n', long, help = "Show line numbers for matches")]
+    show_line_numbers: bool,
+    #[arg(
+        long,
+        value_enum,
+        help = "Control color output",
+        default_value = "auto"
+    )]
+    color: Color,
 
-    let mut reader: Box<dyn BufRead> = match file {
-        "-" => Box::new(BufReader::new(io::stdin())),
-        path => Box::new(BufReader::new(fs::File::open(path).unwrap())),
-    };
+    #[arg(short = 'f', long, help = "Show full frame for matches")]
+    show_full_frame: bool,
 
-    // Read the header line of the input
-    let mut header_line = String::new();
-    reader.read_line(&mut header_line).unwrap();
-    let header: Header = serde_json::from_str(&header_line).unwrap();
-
-    // Print the header line
-    println!("{:?}", header);
-
-    let start_time = header.timestamp.unwrap();
-
-    let mut interval_start : u64 = 0;
-    let mut current_line = 0;
-    let mut current_line_timestamp : f64 = 0.0;
-    let mut intervals : Vec<(u64,u64,f64,String)> = Vec::new();
-    for (_entry_num, logline) in reader.lines().enumerate() {
-        if let Err(_e) = logline {
-            break;
-        }
-        let line = logline.unwrap();
-        let entry: Entry = serde_json::from_str(&line).unwrap();
-        if entry.kind == EntryKind::Input {
-            continue;
-        }
-
-        println!("{:?}", entry);
-
-        // Set the timestamp if not already set
-        if current_line_timestamp == 0.0 {
-            current_line_timestamp = entry.timestamp;
-        }
-
-        vt.feed_str(&entry.data);
-        let mut vttext = vt.text();
-        trim_text(&mut vttext);
-        println!("Text after feeding: {:?}", vttext);
-        let lines = vt.lines();
-        if lines.len()-1 > current_line {
-            println!("Now at {} lines", lines.len()-1);
-            let mut combined = String::new();
-
-            // Collect the text of the lines we haven't scanned yet; don't include the
-            // last line because it might be partial
-            for line in &vt.lines()[current_line..lines.len()-1] {
-                let trim = line.text().trim_end().to_owned();
-                if !trim.is_empty() {
-                    combined.push_str(&trim);
-                    combined.push('\n');
-                }
-            }
-
-            // Update intervals
-            let interval_end = interval_start + combined.len() as u64;
-            intervals.push((interval_start, interval_end, current_line_timestamp, combined));
-            println!("{:?}", intervals[intervals.len()-1]);
-            interval_start = interval_end;
-            current_line_timestamp = entry.timestamp;
-            current_line = lines.len()-1;
-        }
-    }
-
-    // Create the trailing interval
-    println!("Processing trailing lines starting from line {}", current_line);
-    let mut combined = String::new();
-    for line in &vt.lines()[current_line..] {
-        combined.push_str(&line.text().trim_end());
-        combined.push('\n');
-    }
-    let interval_end = interval_start + combined.len() as u64;
-    intervals.push((interval_start, interval_end, current_line_timestamp, combined));
-    println!("{:?}", intervals[intervals.len()-1]);
-
-    println!("VT text: {:?}", vt.text());
-
-    for (_s, _e, _t, itext) in &intervals {
-        // Scan the text we just collected
-        st.scan(itext, &scratch, |_id, from: u64, to, _flags| {
-            // println!("found pattern {} : {} @ [{}, {})", id, pattern.expression, from, to);
-            // Search backward for the interval that contains the match start
-            let mut match_start_interval_idx = 0;
-            let mut start_timestamp = 0.0;
-            for (i, (start, end, timestamp, _text)) in intervals.iter().enumerate().rev() {
-                if from < *end && from >= *start {
-                    // found the start interval
-                    match_start_interval_idx = i;
-                    start_timestamp = *timestamp;
-                    break;
-                }
-            }
-            let end_timestamp = current_line_timestamp;
-            let num_intervals = intervals.len() - match_start_interval_idx;
-            // Collect the text of the intervals that contain the match
-            let interval_text = intervals[match_start_interval_idx..]
-                .iter()
-                .map(|(_s, _e, _ts, t)| t.to_owned())
-                .collect::<Vec<String>>().join("");
-            // Get a nice timestamp for each. Compute nsecs from the fractional part
-            // of the timestamp
-            let start_timestamp = Local.timestamp_opt(
-                start_time as i64 + start_timestamp as i64,
-                (start_timestamp.fract() * 1e9) as u32).unwrap();
-            let end_timestamp = Local.timestamp_opt(
-                start_time as i64 + end_timestamp as i64,
-                (end_timestamp.fract() * 1e9) as u32).unwrap();
-
-            println!("Match at [{},{}] spans {} interval{} from {} .. {}",
-                from, to, num_intervals, if num_intervals == 1 {""} else {"s"},
-                start_timestamp, end_timestamp);
-
-            // Get the text of the line where the match occurs
-            let match_line_start = interval_text[..(from as usize)]
-                .rfind('\n').map(|i| i+1).unwrap_or(0);
-            let match_line_end = interval_text[(to as usize)..]
-                .find('\n').map(|i| i+to as usize).unwrap_or(interval_text.len());
-            let match_line = &interval_text[match_line_start..match_line_end];
-            println!("{}", match_line);
-
-            Matching::Continue
-        }).unwrap();
-    }
+    #[arg(
+        short = 't',
+        long,
+        default_value = "stdout",
+        value_parser = clap::builder::PossibleValuesParser::new(["stdout", "stdin"]),
+        help = "Select event type to search over"
+    )]
+    event_type: String,
 }
 
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Validation: make sure that if "-" is specified, it is only used once
     let mut stdin_count = 0;
@@ -230,14 +442,18 @@ fn main() {
         }
     }
 
+    // If we're only listing filenames, we only need one match
+    if args.list_only {
+        args.max_matches = Some(1);
+    }
+
     let pattern = pattern! {
         args.pattern.clone();
-        CompileFlags::SOM_LEFTMOST |
+        CompileFlags::SOM_LEFTMOST | CompileFlags::UTF8 |
             if args.case_insensitive { CompileFlags::CASELESS } else { CompileFlags::empty() }
     };
 
     for file in &args.files {
-        println!("{}:", file);
         search_file(&pattern, file.as_str(), &args);
     }
 }
