@@ -12,6 +12,10 @@ hyperscan = "0.3"
 serde = "1.0.189"
 serde_json = "1.0"
 clap = {version = "4.4.6", features = ["derive"]}
+anstyle = "1.0.1"
 chrono = "0.4.31"
 log = "0.4.20"
 zstd = "0.13.0"
+
+[profile.release]
+debug = 1
