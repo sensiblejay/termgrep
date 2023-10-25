@@ -1,0 +1,22 @@
+name: build
+
+on: [pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: install hyperscan dependencies
+        run: sudo apt-get install -y libhyperscan-dev
+      - name: set up rust
+        uses: moonrepo/setup-rust@v1
+        with:
+          profile: minimal
+      - name: run cargo check
+        run: cargo check
+      - name: fun fun fun
+        run: cargo run --release -- resume testdata/hello.cast

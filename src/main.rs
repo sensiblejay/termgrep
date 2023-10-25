@@ -86,8 +86,8 @@ type Env = HashMap<String, String>;
 #[derive(Serialize, Deserialize, Debug)]
 struct Header {
     version: u8,
-    width: u16,
-    height: u16,
+    width: usize,
+    height: usize,
     env: Option<Env>,
     timestamp: Option<u64>,
     command: Option<String>,
@@ -113,58 +113,59 @@ struct MatchData {
     match_ranges: Vec<(usize, usize)>,
 }
 
-fn events(
-    reader: impl BufRead,
-    event_type: Option<EntryKind>,
-) -> impl Iterator<Item = (f64, String)> {
+fn events(reader: impl BufRead, event_type: EntryKind) -> impl Iterator<Item = (f64, String)> {
     reader.lines().filter_map(move |line| {
         let line = line.ok()?;
         let entry: Entry = serde_json::from_str(&line).ok()?;
-        if let Some(kind) = event_type {
-            if entry.kind != kind {
-                return None;
-            }
+        if entry.kind == event_type {
+            Some((entry.timestamp, entry.data))
+        } else {
+            None
         }
-        Some((entry.timestamp, entry.data))
     })
 }
 
-fn stdout(reader: impl BufRead + 'static) -> Box<dyn Iterator<Item = (f64, String)>> {
-    Box::new(events(reader, Some(EntryKind::Output)))
-}
-
-fn stdin(reader: impl BufRead + 'static) -> Box<dyn Iterator<Item = (f64, String)>> {
-    Box::new(events(reader, Some(EntryKind::Input)))
-}
-
 pub fn frames(
-    stream: impl Iterator<Item = (f64, String)>,
+    reader: Box<dyn BufRead + 'static>,
     is_stdin: bool,
-) -> impl Iterator<Item = (f64, Vec<Vec<(char, avt::Pen)>>, Option<(usize, usize)>)> {
-    // 1000 chars should be enough for anyone
-    let mut vt = Vt::new(1000, 100);
-    let mut prev_cursor = None;
-
-    stream.filter_map(move |(time, data)| {
+    width: usize,
+    height: usize,
+) -> impl Iterator<Item = (f64, String, Option<(usize, usize)>)> {
+    let mut vt = Vt::new(width, height);
+    let mut prev_cursor: Option<(usize, usize)> = None;
+    let event_type = if is_stdin {
+        EntryKind::Input
+    } else {
+        EntryKind::Output
+    };
+    events(reader, event_type).filter_map(move |(time, data)| {
         // For stdin, we need to change \r to \r\n
         let data = if is_stdin {
-            data.replace("\r", "\r\n")
+            data.replace('\r', "\r\n")
         } else {
             data
         };
         let (changed_lines, _) = vt.feed_str(&data);
-        let cursor: Option<(usize, usize)> = vt.cursor().into();
+        let cursor = vt.cursor().into();
 
         if !changed_lines.is_empty() || cursor != prev_cursor {
             prev_cursor = cursor;
 
-            let lines = vt
-                .view()
-                .iter()
-                .map(|line| line.cells().collect())
-                .collect();
+            // it seems like the terminal uses this much? let's see!
+            let lower_bound = width * height;
+            let mut frame_text = String::with_capacity(lower_bound);
+            for line in vt.view() {
+                frame_text.extend(line.chars());
+                frame_text.truncate(frame_text.trim_end().len());
+                frame_text.push('\n');
+            }
+            debug!(
+                "frame_text: len {len}, cap {capacity}",
+                len = frame_text.len(),
+                capacity = frame_text.capacity()
+            );
 
-            Some((time, lines, cursor))
+            Some((time, frame_text, cursor))
         } else {
             prev_cursor = cursor;
 
@@ -276,9 +277,9 @@ fn display_match(matchdata: &MatchData, args: &Args) {
     );
     // Print the matching lines in the frame
     if args.show_full_frame {
-        print!("{}", highlight_matches(&matchdata, &args));
+        print!("{}", highlight_matches(matchdata, args));
     } else {
-        print!("{}", highlight_matchlines(&matchdata, &args));
+        print!("{}", highlight_matchlines(matchdata, args));
     }
 }
 
@@ -315,89 +316,68 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
     // Collect matching frames
     let mut mi: Option<MatchData> = None;
     let target_is_stdin = args.event_type == "stdin";
-    let event_stream = if target_is_stdin {
-        stdin(reader)
-    } else {
-        stdout(reader)
-    };
 
-    for (i, (time, lines, _cursor)) in frames(event_stream, target_is_stdin).enumerate() {
-        let mut frame_text = String::new();
-        for chars in lines.iter() {
-            let mut line_text = String::new();
-            // Collect the text of the line
-            for (ch, _pen) in chars.iter() {
-                line_text.push(*ch);
+    for (i, (time, frame_text, _cursor)) in
+        frames(reader, target_is_stdin, header.width, header.height).enumerate()
+    {
+        let res = db.scan(&frame_text, &scratch, |_id, from: u64, to, _flags| {
+            debug!("Match frame {} at {} from {} to {}", i, time, from, to);
+            match_count += 1;
+            if match_count > max_matches {
+                warn!("Maximum number of matches reached; stopping");
+                return Matching::Terminate;
             }
-            // Trim the line and only add it if it's not empty
-            line_text = line_text.trim_end().to_string();
-            if !line_text.is_empty() {
-                frame_text.push_str(&line_text);
-                frame_text.push('\n');
-            }
-        }
-        let res = db.scan(
-            frame_text.clone(),
-            &scratch,
-            |_id, from: u64, to, _flags| {
-                debug!("Match frame {} at {} from {} to {}", i, time, from, to);
-                match_count += 1;
-                if match_count > max_matches {
-                    warn!("Maximum number of matches reached; stopping");
-                    return Matching::Terminate;
+            match mi {
+                None => {
+                    mi = Some(MatchData {
+                        filename: file.to_string(),
+                        start_time,
+                        start_frame: i,
+                        end_frame: i,
+                        start_ts: time,
+                        end_ts: time,
+                        last_frame_text: frame_text.clone(),
+                        match_ranges: vec![(from as usize, to as usize)],
+                    });
+                    debug!(
+                        "First matching frame found at {} {}",
+                        i,
+                        make_timestamp(start_time, time)
+                    );
                 }
-                match mi {
-                    None => {
-                        mi = Some(MatchData {
-                            filename: file.to_string(),
-                            start_time,
-                            start_frame: i,
-                            end_frame: i,
-                            start_ts: time,
-                            end_ts: time,
-                            last_frame_text: frame_text.clone(),
-                            match_ranges: vec![(from as usize, to as usize)],
-                        });
-                        debug!(
-                            "First matching frame found at {} {}",
-                            i,
-                            make_timestamp(start_time, time)
-                        );
-                    }
-                    Some(ref mut mi) => {
-                        if i == mi.end_frame + 1 {
-                            // Contiguous
-                            mi.end_frame = i;
-                            mi.end_ts = time;
-                            mi.last_frame_text.clear();
-                            mi.last_frame_text.push_str(&frame_text);
-                            mi.match_ranges.clear();
-                            mi.match_ranges.push((from as usize, to as usize));
-                            debug!("Extended matching frame range to {}", i);
-                        } else if i == mi.end_frame {
-                            // Same frame; add the match to the list
-                            mi.match_ranges.push((from as usize, to as usize));
-                            debug!("Additional match within the same frame; do nothing");
-                        } else {
-                            // Not contiguous; display the match. We use the last frame text.
-                            // TODO: consider whether we should do something if there are multiple
-                            // matches in the same frame; by the time we get to the last frame
-                            // some of the matches may have disappeared...
-                            display_match(mi, args);
-                            mi.start_frame = i;
-                            mi.end_frame = i;
-                            mi.start_ts = time;
-                            mi.end_ts = time;
-                            mi.last_frame_text.clear();
-                            mi.last_frame_text.push_str(&frame_text);
-                            mi.match_ranges.clear();
-                            mi.match_ranges.push((from as usize, to as usize));
-                        }
+                Some(ref mut mi) => {
+                    if i == mi.end_frame + 1 {
+                        // Contiguous
+                        mi.end_frame = i;
+                        mi.end_ts = time;
+                        mi.last_frame_text.clear();
+                        mi.last_frame_text.push_str(&frame_text);
+                        mi.match_ranges.clear();
+                        mi.match_ranges.push((from as usize, to as usize));
+                        debug!("Extended matching frame range to {}", i);
+                    } else if i == mi.end_frame {
+                        // Same frame; add the match to the list
+                        mi.match_ranges.push((from as usize, to as usize));
+                        debug!("Additional match within the same frame; do nothing");
+                    } else {
+                        // Not contiguous; display the match. We use the last frame text.
+                        // TODO: consider whether we should do something if there are multiple
+                        // matches in the same frame; by the time we get to the last frame
+                        // some of the matches may have disappeared...
+                        display_match(mi, args);
+                        mi.start_frame = i;
+                        mi.end_frame = i;
+                        mi.start_ts = time;
+                        mi.end_ts = time;
+                        mi.last_frame_text.clear();
+                        mi.last_frame_text.push_str(&frame_text);
+                        mi.match_ranges.clear();
+                        mi.match_ranges.push((from as usize, to as usize));
                     }
                 }
-                return Matching::Continue;
-            },
-        );
+            }
+            Matching::Continue
+        });
         if let Err(e) = res {
             match e {
                 hyperscan::Error::Hyperscan(ScanTerminated) => {
