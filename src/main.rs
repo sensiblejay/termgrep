@@ -128,7 +128,7 @@ fn events(reader: impl BufRead, event_type: EntryKind) -> impl Iterator<Item = (
 pub fn frames(
     reader: Box<dyn BufRead + 'static>,
     is_stdin: bool,
-) -> impl Iterator<Item = (f64, Vec<Vec<(char, avt::Pen)>>, Option<(usize, usize)>)> {
+) -> impl Iterator<Item = (f64, Vec<String>, Option<(usize, usize)>)> {
     // 1000 chars should be enough for anyone
     let mut vt = Vt::new(1000, 100);
     let mut prev_cursor = None;
@@ -153,7 +153,7 @@ pub fn frames(
             let lines = vt
                 .view()
                 .iter()
-                .map(|line| line.cells().collect())
+                .map(|line| line.cells().map(|(c, _)| *c).collect())
                 .collect();
 
             Some((time, lines, cursor))
@@ -312,10 +312,9 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
     let mut frame_text = String::new();
     for (i, (time, lines, _cursor)) in frames(reader, target_is_stdin).enumerate() {
         frame_text.clear();
-        for chars in lines.iter() {
+        for line in lines.iter() {
             let at = frame_text.len();
-            frame_text.extend(chars.iter().map(|(ch, _)| *ch));
-            frame_text.truncate(frame_text.trim_end().len());
+            frame_text.push_str(line.trim_end());
             if frame_text.len() > at {
                 frame_text.push('\n');
             }
