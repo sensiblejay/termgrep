@@ -160,7 +160,7 @@ pub fn frames(
                 frame_text.extend(line.chars().chain(Some('\n')));
             }
 
-            Some((time, frame_text, cursor.into()))
+            Some((time, frame_text, cursor))
         } else {
             prev_cursor = cursor;
 

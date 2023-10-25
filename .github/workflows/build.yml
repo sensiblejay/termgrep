@@ -18,3 +18,5 @@ jobs:
           profile: minimal
       - name: run cargo check
         run: cargo check
+      - name: fun fun fun
+        run: cargo run --release -- resume testdata/hello.cast
