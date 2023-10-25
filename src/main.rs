@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use log::{debug, info, warn};
 
 use std::io::IsTerminal;
+use tracing::info as tracing_info;
 
 // Annoying to have to do this but by god I need those colors in the help output
 pub fn get_styles() -> clap::builder::Styles {
@@ -129,12 +130,12 @@ fn events(
     })
 }
 
-fn stdout(reader: impl BufRead + 'static) -> Box<dyn Iterator<Item = (f64, String)>> {
-    Box::new(events(reader, Some(EntryKind::Output)))
+fn stdout(reader: impl BufRead + 'static) -> impl Iterator<Item = (f64, String)> {
+    events(reader, Some(EntryKind::Output))
 }
 
-fn stdin(reader: impl BufRead + 'static) -> Box<dyn Iterator<Item = (f64, String)>> {
-    Box::new(events(reader, Some(EntryKind::Input)))
+fn stdin(reader: impl BufRead + 'static) -> impl Iterator<Item = (f64, String)> {
+    events(reader, Some(EntryKind::Input))
 }
 
 pub fn frames(
@@ -283,20 +284,19 @@ fn display_match(matchdata: &MatchData, args: &Args) {
 }
 
 fn search_file(pattern: &Pattern, file: &str, args: &Args) {
+    tracing_info!("Searching file {}", file);
     let db: BlockDatabase = pattern.build().unwrap_or_else(|e| {
         eprintln!("Error building pattern {}: {}", pattern.expression, e);
         std::process::exit(1);
     });
     let scratch = db.alloc_scratch().unwrap();
 
-    let mut reader: Box<dyn BufRead> = if file == "-" {
-        Box::new(BufReader::new(io::stdin()))
+    let mut reader = if file == "-" {
+        BufReader::new(io::stdin())
     } else if file.ends_with(".zst") {
-        Box::new(BufReader::new(
-            zstd::Decoder::new(fs::File::open(file).unwrap()).unwrap(),
-        ))
+        BufReader::new(zstd::Decoder::new(fs::File::open(file).unwrap()).unwrap())
     } else {
-        Box::new(BufReader::new(fs::File::open(file).unwrap()))
+        BufReader::new(fs::File::open(file).unwrap())
     };
 
     // Read the header line of the input
@@ -459,6 +459,12 @@ struct Args {
 }
 
 fn main() {
+    use tracing_chrome::ChromeLayerBuilder;
+    use tracing_subscriber::{prelude::*, registry::Registry};
+
+    let (chrome_layer, _guard) = ChromeLayerBuilder::new().build();
+    tracing_subscriber::registry().with(chrome_layer).init();
+
     let mut args = Args::parse();
 
     // Validation: make sure that if "-" is specified, it is only used once

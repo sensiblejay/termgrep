@@ -16,6 +16,9 @@ anstyle = "1.0.1"
 chrono = "0.4.31"
 log = "0.4.20"
 zstd = "0.13.0"
+tracing = "0.1.40"
+tracing-chrome = "0.7.1"
+tracing-subscriber = "0.3.17"
 
 [profile.release]
 debug = 1
