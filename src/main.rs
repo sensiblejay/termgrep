@@ -118,17 +118,18 @@ fn events(reader: impl BufRead, event_type: EntryKind) -> impl Iterator<Item = (
     reader.lines().filter_map(move |line| {
         let line = line.ok()?;
         let entry: Entry = serde_json::from_str(&line).ok()?;
-        if entry.kind != event_type {
-            return None;
+        if entry.kind == event_type {
+            Some((entry.timestamp, entry.data))
+        } else {
+            None
         }
-        Some((entry.timestamp, entry.data))
     })
 }
 
 pub fn frames(
     reader: Box<dyn BufRead + 'static>,
     is_stdin: bool,
-) -> impl Iterator<Item = (f64, Vec<String>, Option<(usize, usize)>)> {
+) -> impl Iterator<Item = (f64, String, Option<(usize, usize)>)> {
     // 1000 chars should be enough for anyone
     let mut vt = Vt::new(1000, 100);
     let mut prev_cursor = None;
@@ -153,7 +154,13 @@ pub fn frames(
             let lines = vt
                 .view()
                 .iter()
-                .map(|line| line.cells().map(|(c, _)| c).collect())
+                .map(|line| {
+                    line.cells()
+                        .map(|(c, _)| c)
+                        .chain(Some('\n'))
+                        .collect::<String>()
+                })
+                .filter(|line| !line.trim_end().is_empty())
                 .collect();
 
             Some((time, lines, cursor))
@@ -309,16 +316,7 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
     let mut mi: Option<MatchData> = None;
     let target_is_stdin = args.event_type == "stdin";
 
-    let mut frame_text = String::new();
-    for (i, (time, lines, _cursor)) in frames(reader, target_is_stdin).enumerate() {
-        frame_text.clear();
-        for line in lines.iter() {
-            let at = frame_text.len();
-            frame_text.push_str(line.trim_end());
-            if frame_text.len() > at {
-                frame_text.push('\n');
-            }
-        }
+    for (i, (time, frame_text, _cursor)) in frames(reader, target_is_stdin).enumerate() {
         let res = db.scan(&frame_text, &scratch, |_id, from: u64, to, _flags| {
             debug!("Match frame {} at {} from {} to {}", i, time, from, to);
             match_count += 1;
