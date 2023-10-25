@@ -151,14 +151,12 @@ pub fn frames(
         if !changed_lines.is_empty() || cursor != prev_cursor {
             prev_cursor = cursor;
 
-            // is this a good way to get a size hint for this? going to reallocate a lot i think but everything underneath is Vecs so this should work
-            let lower_bound = vt
-                .lines()
-                .iter()
-                .map(|line| line.cells().size_hint().0 + 1)
-                .sum::<usize>();
+            // is this a good way to get a size hint for this?
+            // everything underneath is Vecs so this should work
+            let lower_bound = vt.lines().iter().map(|line| line.len() + 1).sum::<usize>();
             let mut frame_text = String::with_capacity(lower_bound);
             for line in vt.view() {
+                frame_text.truncate(frame_text.trim_end().len());
                 frame_text.extend(line.chars().chain(Some('\n')));
             }
 
