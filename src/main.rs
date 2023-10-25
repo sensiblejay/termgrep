@@ -87,8 +87,8 @@ type Env = HashMap<String, String>;
 #[derive(Serialize, Deserialize, Debug)]
 struct Header {
     version: u8,
-    width: u16,
-    height: u16,
+    width: usize,
+    height: usize,
     env: Option<Env>,
     timestamp: Option<u64>,
     command: Option<String>,
@@ -129,9 +129,10 @@ fn events(reader: impl BufRead, event_type: EntryKind) -> impl Iterator<Item = (
 pub fn frames(
     reader: Box<dyn BufRead + 'static>,
     is_stdin: bool,
+    width: usize,
+    height: usize,
 ) -> impl Iterator<Item = (f64, String, Option<(usize, usize)>)> {
-    // 1000 chars should be enough for anyone
-    let mut vt = Vt::new(1000, 100);
+    let mut vt = Vt::new(width, height);
     let mut prev_cursor: Option<(usize, usize)> = None;
     let event_type = if is_stdin {
         EntryKind::Input
@@ -151,16 +152,18 @@ pub fn frames(
         if !changed_lines.is_empty() || cursor != prev_cursor {
             prev_cursor = cursor;
 
-            // is this a good way to get a size hint for this?
-            // everything underneath is Vecs so this should work
-            let lower_bound = vt.lines().iter().map(|line| line.len() + 1).sum::<usize>();
-            println!("lower bound: {lower_bound}");
+            // it seems like the terminal uses this much? let's see!
+            let lower_bound = width * height;
             let mut frame_text = String::with_capacity(lower_bound);
             for line in vt.view() {
                 // frame_text.truncate(frame_text.trim_end().len());
                 frame_text.extend(line.chars().chain(Some('\n')));
             }
-            println!("frame text length: {len}", len = frame_text.len());
+            println!(
+                "frame_text: {len}, {capacity}",
+                len = frame_text.len(),
+                capacity = frame_text.capacity()
+            );
 
             Some((time, frame_text, cursor))
         } else {
@@ -315,7 +318,9 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
     let mut mi: Option<MatchData> = None;
     let target_is_stdin = args.event_type == "stdin";
 
-    for (i, (time, frame_text, _cursor)) in frames(reader, target_is_stdin).enumerate() {
+    for (i, (time, frame_text, _cursor)) in
+        frames(reader, target_is_stdin, header.width, header.height).enumerate()
+    {
         let res = db.scan(&frame_text, &scratch, |_id, from: u64, to, _flags| {
             debug!("Match frame {} at {} from {} to {}", i, time, from, to);
             match_count += 1;
