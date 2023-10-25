@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use log::{debug, info, warn};
 
 use std::io::IsTerminal;
-use tracing::info as tracing_info;
 
 // Annoying to have to do this but by god I need those colors in the help output
 pub fn get_styles() -> clap::builder::Styles {
@@ -285,7 +284,6 @@ fn display_match(matchdata: &MatchData, args: &Args) {
 }
 
 fn search_file(pattern: &Pattern, file: &str, args: &Args) {
-    tracing_info!("Searching file {}", file);
     let db: BlockDatabase = pattern.build().unwrap_or_else(|e| {
         eprintln!("Error building pattern {}: {}", pattern.expression, e);
         std::process::exit(1);
@@ -449,12 +447,6 @@ struct Args {
 }
 
 fn main() {
-    use tracing_chrome::ChromeLayerBuilder;
-    use tracing_subscriber::prelude::*;
-
-    let (chrome_layer, _guard) = ChromeLayerBuilder::new().build();
-    tracing_subscriber::registry().with(chrome_layer).init();
-
     let mut args = Args::parse();
 
     // Validation: make sure that if "-" is specified, it is only used once
