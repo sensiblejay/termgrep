@@ -154,11 +154,13 @@ pub fn frames(
             // is this a good way to get a size hint for this?
             // everything underneath is Vecs so this should work
             let lower_bound = vt.lines().iter().map(|line| line.len() + 1).sum::<usize>();
+            println!("lower bound: {lower_bound}");
             let mut frame_text = String::with_capacity(lower_bound);
             for line in vt.view() {
-                frame_text.truncate(frame_text.trim_end().len());
+                // frame_text.truncate(frame_text.trim_end().len());
                 frame_text.extend(line.chars().chain(Some('\n')));
             }
+            println!("frame text length: {len}", len = frame_text.len());
 
             Some((time, frame_text, cursor))
         } else {
