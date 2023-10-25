@@ -156,11 +156,12 @@ pub fn frames(
             let lower_bound = width * height;
             let mut frame_text = String::with_capacity(lower_bound);
             for line in vt.view() {
-                // frame_text.truncate(frame_text.trim_end().len());
-                frame_text.extend(line.chars().chain(Some('\n')));
+                frame_text.extend(line.chars());
+                frame_text.truncate(frame_text.trim_end().len());
+                frame_text.push('\n');
             }
-            println!(
-                "frame_text: {len}, {capacity}",
+            debug!(
+                "frame_text: len {len}, cap {capacity}",
                 len = frame_text.len(),
                 capacity = frame_text.capacity()
             );
