@@ -129,7 +129,7 @@ fn events(reader: impl BufRead, event_type: EntryKind) -> impl Iterator<Item = (
 pub fn frames(
     reader: Box<dyn BufRead + 'static>,
     is_stdin: bool,
-) -> impl Iterator<Item = (f64, String, Option<(usize, usize)>)> {
+) -> impl Iterator<Item = (f64, String, (usize, usize))> {
     // 1000 chars should be enough for anyone
     let mut vt = Vt::new(1000, 100);
     let mut prev_cursor = None;
@@ -146,26 +146,25 @@ pub fn frames(
             data
         };
         let (changed_lines, _) = vt.feed_str(&data);
-        let cursor: Option<(usize, usize)> = vt.cursor().into();
+        let cursor = vt.cursor();
 
-        if !changed_lines.is_empty() || cursor != prev_cursor {
-            prev_cursor = cursor;
+        if !changed_lines.is_empty() || Some(cursor) != prev_cursor {
+            prev_cursor = Some(cursor);
 
-            let lines = vt
-                .view()
+            // is this a good way to get a size hint for this? going to reallocate a lot i think but everything underneath is Vecs so this should work
+            let lower_bound = vt
+                .lines()
                 .iter()
-                .map(|line| {
-                    line.cells()
-                        .map(|(c, _)| c)
-                        .chain(Some('\n'))
-                        .collect::<String>()
-                })
-                .filter(|line| !line.trim_end().is_empty())
-                .collect();
+                .map(|line| line.cells().size_hint().0 + 1)
+                .sum::<usize>();
+            let mut frame_text = String::with_capacity(lower_bound);
+            for line in vt.view() {
+                frame_text.extend(line.chars().chain(Some('\n')));
+            }
 
-            Some((time, lines, cursor))
+            Some((time, frame_text, cursor.into()))
         } else {
-            prev_cursor = cursor;
+            prev_cursor = Some(cursor);
 
             None
         }
