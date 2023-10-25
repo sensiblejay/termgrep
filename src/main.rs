@@ -153,7 +153,7 @@ pub fn frames(
             let lines = vt
                 .view()
                 .iter()
-                .map(|line| line.cells().map(|(c, _)| *c).collect())
+                .map(|line| line.cells().map(|(c, _)| c).collect())
                 .collect();
 
             Some((time, lines, cursor))
