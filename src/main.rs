@@ -336,68 +336,64 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
                 frame_text.push('\n');
             }
         }
-        let res = db.scan(
-            frame_text.clone(),
-            &scratch,
-            |_id, from: u64, to, _flags| {
-                debug!("Match frame {} at {} from {} to {}", i, time, from, to);
-                match_count += 1;
-                if match_count > max_matches {
-                    warn!("Maximum number of matches reached; stopping");
-                    return Matching::Terminate;
+        let res = db.scan(&frame_text, &scratch, |_id, from: u64, to, _flags| {
+            debug!("Match frame {} at {} from {} to {}", i, time, from, to);
+            match_count += 1;
+            if match_count > max_matches {
+                warn!("Maximum number of matches reached; stopping");
+                return Matching::Terminate;
+            }
+            match mi {
+                None => {
+                    mi = Some(MatchData {
+                        filename: file.to_string(),
+                        start_time,
+                        start_frame: i,
+                        end_frame: i,
+                        start_ts: time,
+                        end_ts: time,
+                        last_frame_text: frame_text,
+                        match_ranges: vec![(from as usize, to as usize)],
+                    });
+                    debug!(
+                        "First matching frame found at {} {}",
+                        i,
+                        make_timestamp(start_time, time)
+                    );
                 }
-                match mi {
-                    None => {
-                        mi = Some(MatchData {
-                            filename: file.to_string(),
-                            start_time,
-                            start_frame: i,
-                            end_frame: i,
-                            start_ts: time,
-                            end_ts: time,
-                            last_frame_text: frame_text.clone(),
-                            match_ranges: vec![(from as usize, to as usize)],
-                        });
-                        debug!(
-                            "First matching frame found at {} {}",
-                            i,
-                            make_timestamp(start_time, time)
-                        );
-                    }
-                    Some(ref mut mi) => {
-                        if i == mi.end_frame + 1 {
-                            // Contiguous
-                            mi.end_frame = i;
-                            mi.end_ts = time;
-                            mi.last_frame_text.clear();
-                            mi.last_frame_text.push_str(&frame_text);
-                            mi.match_ranges.clear();
-                            mi.match_ranges.push((from as usize, to as usize));
-                            debug!("Extended matching frame range to {}", i);
-                        } else if i == mi.end_frame {
-                            // Same frame; add the match to the list
-                            mi.match_ranges.push((from as usize, to as usize));
-                            debug!("Additional match within the same frame; do nothing");
-                        } else {
-                            // Not contiguous; display the match. We use the last frame text.
-                            // TODO: consider whether we should do something if there are multiple
-                            // matches in the same frame; by the time we get to the last frame
-                            // some of the matches may have disappeared...
-                            display_match(mi, args);
-                            mi.start_frame = i;
-                            mi.end_frame = i;
-                            mi.start_ts = time;
-                            mi.end_ts = time;
-                            mi.last_frame_text.clear();
-                            mi.last_frame_text.push_str(&frame_text);
-                            mi.match_ranges.clear();
-                            mi.match_ranges.push((from as usize, to as usize));
-                        }
+                Some(ref mut mi) => {
+                    if i == mi.end_frame + 1 {
+                        // Contiguous
+                        mi.end_frame = i;
+                        mi.end_ts = time;
+                        mi.last_frame_text.clear();
+                        mi.last_frame_text.push_str(&frame_text);
+                        mi.match_ranges.clear();
+                        mi.match_ranges.push((from as usize, to as usize));
+                        debug!("Extended matching frame range to {}", i);
+                    } else if i == mi.end_frame {
+                        // Same frame; add the match to the list
+                        mi.match_ranges.push((from as usize, to as usize));
+                        debug!("Additional match within the same frame; do nothing");
+                    } else {
+                        // Not contiguous; display the match. We use the last frame text.
+                        // TODO: consider whether we should do something if there are multiple
+                        // matches in the same frame; by the time we get to the last frame
+                        // some of the matches may have disappeared...
+                        display_match(mi, args);
+                        mi.start_frame = i;
+                        mi.end_frame = i;
+                        mi.start_ts = time;
+                        mi.end_ts = time;
+                        mi.last_frame_text.clear();
+                        mi.last_frame_text.push_str(&frame_text);
+                        mi.match_ranges.clear();
+                        mi.match_ranges.push((from as usize, to as usize));
                     }
                 }
-                return Matching::Continue;
-            },
-        );
+            }
+            return Matching::Continue;
+        });
         if let Err(e) = res {
             match e {
                 hyperscan::Error::Hyperscan(ScanTerminated) => {
