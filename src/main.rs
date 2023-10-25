@@ -291,7 +291,7 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
     });
     let scratch = db.alloc_scratch().unwrap();
 
-    let mut reader: Box<dyn BufReader> = if file == "-" {
+    let mut reader: Box<dyn BufRead> = if file == "-" {
         Box::new(BufReader::new(io::stdin()))
     } else if file.ends_with(".zst") {
         Box::new(BufReader::new(
