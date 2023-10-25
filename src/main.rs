@@ -292,11 +292,13 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
     let scratch = db.alloc_scratch().unwrap();
 
     let mut reader = if file == "-" {
-        BufReader::new(io::stdin())
+        Box::new(BufReader::new(io::stdin()))
     } else if file.ends_with(".zst") {
-        BufReader::new(zstd::Decoder::new(fs::File::open(file).unwrap()).unwrap())
+        Box::new(BufReader::new(
+            zstd::Decoder::new(fs::File::open(file).unwrap()).unwrap(),
+        ))
     } else {
-        BufReader::new(fs::File::open(file).unwrap())
+        Box::new(BufReader::new(fs::File::open(file).unwrap()))
     };
 
     // Read the header line of the input
