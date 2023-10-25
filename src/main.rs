@@ -118,19 +118,11 @@ fn events(reader: impl BufRead, event_type: EntryKind) -> impl Iterator<Item = (
     reader.lines().filter_map(move |line| {
         let line = line.ok()?;
         let entry: Entry = serde_json::from_str(&line).ok()?;
-        if entry.kind != kind {
+        if entry.kind != event_type {
             return None;
         }
         Some((entry.timestamp, entry.data))
     })
-}
-
-fn stdout(reader: impl BufRead + 'static) -> impl Iterator<Item = (f64, String)> {
-    events(reader, Some(EntryKind::Output))
-}
-
-fn stdin(reader: impl BufRead + 'static) -> impl Iterator<Item = (f64, String)> {
-    events(reader, Some(EntryKind::Input))
 }
 
 pub fn frames(
