@@ -458,21 +458,6 @@ struct Args {
     event_type: String,
 }
 
-struct Search {
-    args: Args,
-    pattern: Pattern,
-}
-
-impl Search {
-    fn new(args: Args) -> Self {
-        let pattern = pattern! {
-            args.pattern.clone();
-            CompileFlags::SOM_LEFTMOST | CompileFlags::UTF8 |
-                if args.case_insensitive { CompileFlags::CASELESS } else { CompileFlags::empty() }
-        };
-    }
-}
-
 fn main() {
     let mut args = Args::parse();
 
