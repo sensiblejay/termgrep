@@ -148,7 +148,7 @@ pub fn frames(
     stream.filter_map(move |(time, data)| {
         // For stdin, we need to change \r to \r\n
         let data = if is_stdin {
-            data.replace("\r", "\r\n")
+            data.replace('\r', "\r\n")
         } else {
             data
         };
@@ -276,9 +276,9 @@ fn display_match(matchdata: &MatchData, args: &Args) {
     );
     // Print the matching lines in the frame
     if args.show_full_frame {
-        print!("{}", highlight_matches(&matchdata, &args));
+        print!("{}", highlight_matches(matchdata, args));
     } else {
-        print!("{}", highlight_matchlines(&matchdata, &args));
+        print!("{}", highlight_matchlines(matchdata, args));
     }
 }
 
@@ -388,7 +388,7 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
                     }
                 }
             }
-            return Matching::Continue;
+            Matching::Continue
         });
         if let Err(e) = res {
             match e {
@@ -456,21 +456,6 @@ struct Args {
         help = "Select event type to search over"
     )]
     event_type: String,
-}
-
-struct Search {
-    args: Args,
-    pattern: Pattern,
-}
-
-impl Search {
-    fn new(args: Args) -> Self {
-        let pattern = pattern! {
-            args.pattern.clone();
-            CompileFlags::SOM_LEFTMOST | CompileFlags::UTF8 |
-                if args.case_insensitive { CompileFlags::CASELESS } else { CompileFlags::empty() }
-        };
-    }
 }
 
 fn main() {
