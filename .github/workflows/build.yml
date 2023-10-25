@@ -1,0 +1,16 @@
+name: build
+
+on: [pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: install hyperscan dependencies
+        run: sudo apt-get install -y libhyperscan-dev
+      - name: Run build
+        run: cargo build
