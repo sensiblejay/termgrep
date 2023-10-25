@@ -352,7 +352,7 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
                         end_frame: i,
                         start_ts: time,
                         end_ts: time,
-                        last_frame_text: frame_text,
+                        last_frame_text: frame_text.clone(),
                         match_ranges: vec![(from as usize, to as usize)],
                     });
                     debug!(
