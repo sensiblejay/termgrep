@@ -114,17 +114,12 @@ struct MatchData {
     match_ranges: Vec<(usize, usize)>,
 }
 
-fn events(
-    reader: impl BufRead,
-    event_type: Option<EntryKind>,
-) -> impl Iterator<Item = (f64, String)> {
+fn events(reader: impl BufRead, event_type: EntryKind) -> impl Iterator<Item = (f64, String)> {
     reader.lines().filter_map(move |line| {
         let line = line.ok()?;
         let entry: Entry = serde_json::from_str(&line).ok()?;
-        if let Some(kind) = event_type {
-            if entry.kind != kind {
-                return None;
-            }
+        if entry.kind != kind {
+            return None;
         }
         Some((entry.timestamp, entry.data))
     })
@@ -139,14 +134,18 @@ fn stdin(reader: impl BufRead + 'static) -> impl Iterator<Item = (f64, String)> 
 }
 
 pub fn frames(
-    stream: impl Iterator<Item = (f64, String)>,
+    reader: Box<dyn BufRead + 'static>,
     is_stdin: bool,
 ) -> impl Iterator<Item = (f64, Vec<Vec<(char, avt::Pen)>>, Option<(usize, usize)>)> {
     // 1000 chars should be enough for anyone
     let mut vt = Vt::new(1000, 100);
     let mut prev_cursor = None;
-
-    stream.filter_map(move |(time, data)| {
+    let event_type = if is_stdin {
+        EntryKind::Input
+    } else {
+        EntryKind::Output
+    };
+    events(reader, event_type).filter_map(move |(time, data)| {
         // For stdin, we need to change \r to \r\n
         let data = if is_stdin {
             data.replace("\r", "\r\n")
@@ -317,14 +316,9 @@ fn search_file(pattern: &Pattern, file: &str, args: &Args) {
     // Collect matching frames
     let mut mi: Option<MatchData> = None;
     let target_is_stdin = args.event_type == "stdin";
-    let event_stream = if target_is_stdin {
-        stdin(reader)
-    } else {
-        stdout(reader)
-    };
 
     let mut frame_text = String::new();
-    for (i, (time, lines, _cursor)) in frames(event_stream, target_is_stdin).enumerate() {
+    for (i, (time, lines, _cursor)) in frames(reader, target_is_stdin).enumerate() {
         frame_text.clear();
         for chars in lines.iter() {
             let at = frame_text.len();
