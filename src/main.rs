@@ -129,10 +129,10 @@ fn events(reader: impl BufRead, event_type: EntryKind) -> impl Iterator<Item = (
 pub fn frames(
     reader: Box<dyn BufRead + 'static>,
     is_stdin: bool,
-) -> impl Iterator<Item = (f64, String, (usize, usize))> {
+) -> impl Iterator<Item = (f64, String, Option<(usize, usize)>)> {
     // 1000 chars should be enough for anyone
     let mut vt = Vt::new(1000, 100);
-    let mut prev_cursor = None;
+    let mut prev_cursor: Option<(usize, usize)> = None;
     let event_type = if is_stdin {
         EntryKind::Input
     } else {
@@ -146,10 +146,10 @@ pub fn frames(
             data
         };
         let (changed_lines, _) = vt.feed_str(&data);
-        let cursor = vt.cursor();
+        let cursor = vt.cursor().into();
 
-        if !changed_lines.is_empty() || Some(cursor) != prev_cursor {
-            prev_cursor = Some(cursor);
+        if !changed_lines.is_empty() || cursor != prev_cursor {
+            prev_cursor = cursor;
 
             // is this a good way to get a size hint for this? going to reallocate a lot i think but everything underneath is Vecs so this should work
             let lower_bound = vt
@@ -164,7 +164,7 @@ pub fn frames(
 
             Some((time, frame_text, cursor.into()))
         } else {
-            prev_cursor = Some(cursor);
+            prev_cursor = cursor;
 
             None
         }
